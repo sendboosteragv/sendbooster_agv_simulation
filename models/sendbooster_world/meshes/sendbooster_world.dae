@@ -1,0 +1,91 @@
+import trimesh
+import numpy as np
+from PIL import Image
+import yaml
+import os
+import cv2  # OpenCV 필요
+
+# =========================
+# 설정값
+# =========================
+DAE_PATH = "./sendbooster_world.dae"  # 입력 DAE
+OUTPUT_DIR = "./map"
+MAP_NAME = "map"
+
+RESOLUTION = 0.05        # meter / pixel
+WALL_HEIGHT = 0.01       # 바닥 위 1cm 이상을 장애물로 판단
+
+# =========================
+# DAE 로드
+# =========================
+# Scene을 하나의 메쉬로 강제 변환
+mesh = trimesh.load(DAE_PATH, force='mesh')
+mesh.apply_scale(0.001)  # mm → m, 필요시
+
+# =========================
+# 축 변환: y축이 높이
+# =========================
+vertices = mesh.vertices.copy()
+vertices = vertices[:, [0, 2, 1]]  # x, z, y 로 재배치
+mesh.vertices = vertices
+
+# =========================
+# Bounds 계산
+# =========================
+min_bound, max_bound = mesh.bounds
+width = max_bound[0] - min_bound[0]   # x
+height = max_bound[2] - min_bound[2]  # z
+
+img_width = int(width / RESOLUTION)
+img_height = int(height / RESOLUTION)
+
+print(f"Map size: {img_width} x {img_height}")
+
+# =========================
+# 빈 맵 생성 (흰색)
+# =========================
+occupancy = np.ones((img_height, img_width), dtype=np.uint8) * 255
+
+# =========================
+# 메쉬를 2D로 투영 (x/z 평면)
+# =========================
+for face in mesh.faces:
+    verts = mesh.vertices[face]
+
+    # 장애물 기준
+    if np.max(verts[:, 1]) < WALL_HEIGHT:
+        continue
+
+    # 픽셀 좌표 변환
+    pts = []
+    for v in verts:
+        x_pix = int((v[0] - min_bound[0]) / RESOLUTION)
+        z_pix = int((v[2] - min_bound[2]) / RESOLUTION)
+        pts.append([x_pix, img_height - z_pix - 1])  # 이미지 좌표계 뒤집기
+
+    pts = np.array(pts, np.int32)
+    cv2.fillPoly(occupancy, [pts], 0)  # 면 내부까지 채움
+
+# =========================
+# PGM 저장
+# =========================
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+pgm_path = os.path.join(OUTPUT_DIR, f"{MAP_NAME}.pgm")
+Image.fromarray(occupancy).save(pgm_path)
+print(f"Saved: {pgm_path}")
+
+# =========================
+# YAML 생성
+# =========================
+yaml_data = {
+    "image": f"{MAP_NAME}.pgm",
+    "resolution": RESOLUTION,
+    "origin": [float(min_bound[0]), float(min_bound[2]), 0.0],
+    "negate": 0,
+    "occupied_thresh": 0.65,
+    "free_thresh": 0.2
+}
+yaml_path = os.path.join(OUTPUT_DIR, f"{MAP_NAME}.yaml")
+with open(yaml_path, "w") as f:
+    yaml.dump(yaml_data, f)
+print(f"Saved: {yaml_path}")
